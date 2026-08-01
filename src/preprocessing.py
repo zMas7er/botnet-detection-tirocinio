@@ -18,13 +18,6 @@ CIC_LEAKY_COLS = [
 ]
 
 
-def _ctu13_label_row(label: str) -> tuple[int, str]:
-    label = str(label)
-    if "Botnet" in label or "botnet" in label:
-        return 1, "botnet"
-    return 0, "benign"
-
-
 CTU13_SCENARIO_FAMILY = {
     "42": "Neris", "43": "Neris", "44": "Rbot", "45": "Rbot",
     "46": "Virut", "47": "Menti", "48": "Sogou", "49": "Murlo",
@@ -33,41 +26,68 @@ CTU13_SCENARIO_FAMILY = {
 }
 
 
-def load_ctu13(raw_dir: str) -> pd.DataFrame:
+def load_ctu13(data_dir: str, fraction_benign: float = 1.0) -> pd.DataFrame:
+    """
+    Carica i file .binetflow di CTU-13 estraendo rigorosamente la famiglia.
+    Mappatura Ufficiale Stratosphere rigorosamente applicata.
+    """
     patterns = ["*.binetflow", "*.biargus"]
     files = []
     for p in patterns:
-        files += glob.glob(os.path.join(raw_dir, "**", p), recursive=True)
+        files += glob.glob(os.path.join(data_dir, "**", p), recursive=True)
     files = sorted(set(files))
 
     if not files:
-        raise FileNotFoundError(
-            f"Nessun file di flusso (.binetflow/.biargus) trovato in {raw_dir}. "
-            "Scarica CTU-13 da https://www.stratosphereips.org/datasets-ctu13 "
-            "e posizionalo qui prima di procedere. Controlla il nome esatto "
-            "del file scaricato: se non e' ne' .binetflow ne' .biargus, "
-            "aggiungi il pattern giusto qui sopra."
+        raise FileNotFoundError(f"Nessun file di flusso trovato in {data_dir}.")
+
+    # --- MAPPA UNICA E DEFINITIVA ---
+    # Qualsiasi scenario fuori da questi 4 riceverà "Unknown_Botnet" 
+    # e sarà gestito correttamente dalle guardie anti-leakage.
+    MAP_OFFICIAL = {
+        "42": "Neris",
+        "44": "Rbot",
+        "46": "Virut",
+        "47": "Menti"
+    }
+
+    chunks = []
+    for f in files:
+        # Estraiamo lo scenario in modo robusto (dal nome cartella o dal nome file)
+        m = re.search(r"(\d+)", os.path.basename(os.path.dirname(f)))
+        if not m:
+            m = re.search(r"(\d+)", os.path.basename(f))
+            
+        scenario_num = m.group(1) if m else "Unknown"
+        if scenario_num not in MAP_OFFICIAL:
+            raise RuntimeError(
+        f"Scenario CTU-13 {scenario_num} non mappato. "
+        "Aggiornare MAP_OFFICIAL prima di eseguire l'esperimento."
         )
 
-    frames = []
-    for f in files:
-        df = pd.read_csv(f)
-        m = re.search(r"Botnet-(\d+)", f)
-        scenario = m.group(1) if m else "unknown"
-        family = CTU13_SCENARIO_FAMILY.get(scenario, f"scenario_{scenario}")
+        family = MAP_OFFICIAL[scenario_num]
 
-        label_col = "Label" if "Label" in df.columns else df.columns[-1]
-        labels = df[label_col].apply(_ctu13_label_row)
-        df["label"] = [l[0] for l in labels]
-        df["family"] = np.where(df["label"] == 1, family, "benign")
-        df["source_dataset"] = "CTU-13"
-        df["scenario"] = scenario
-        frames.append(df)
+        for chunk in pd.read_csv(f, chunksize=100000, low_memory=False):
+            label_col = "Label" if "Label" in chunk.columns else chunk.columns[-1]
+            is_botnet = chunk[label_col].astype(str).str.contains("Botnet|botnet", case=False, na=False)
+            
+            botnet_chunk = chunk[is_botnet].copy()
+            if not botnet_chunk.empty:
+                botnet_chunk['scenario'] = scenario_num
+                botnet_chunk['family'] = family
+                botnet_chunk['label'] = 1
+                chunks.append(botnet_chunk)
+                
+            benign_chunk = chunk[~is_botnet].sample(frac=fraction_benign, random_state=42).copy()
+            if not benign_chunk.empty:
+                benign_chunk['scenario'] = "0"
+                benign_chunk['family'] = "benign"
+                benign_chunk['label'] = 0
+                chunks.append(benign_chunk)
 
-    full = pd.concat(frames, ignore_index=True)
-    full = full.drop(columns=[c for c in CTU13_LEAKY_COLS if c in full.columns])
-    if "Label" in full.columns:
-        full = full.drop(columns=["Label"])
+    full = pd.concat(chunks, ignore_index=True)
+    leaky = ["StartTime", "SrcAddr", "DstAddr", "Sport", "Dport", "Label"]
+    full = full.drop(columns=[c for c in leaky if c in full.columns])
+
     return full
 
 
@@ -234,6 +254,20 @@ def align_cic_features(df_2018: pd.DataFrame) -> pd.DataFrame:
     df = df_2018.copy()
     df = df.rename(columns=mapping)
     return df
+
+def check_family_leakage(train_df, target_family):
+    """
+    Interrompe l'esperimento se la famiglia target è presente nel training.
+    """
+    if "family" not in train_df.columns:
+        raise ValueError("La colonna 'family' non è presente nel training set.")
+
+    families = set(train_df["family"].astype(str).unique())
+
+    if target_family in families:
+        raise RuntimeError(
+            f"Leakage rilevato: la famiglia '{target_family}' è presente nel training."
+        )
 
 def split_scale_balance(
     df: pd.DataFrame,

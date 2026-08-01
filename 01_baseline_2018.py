@@ -8,16 +8,17 @@ from imblearn.pipeline import Pipeline as ImbPipeline
 from imblearn.over_sampling import SMOTE
 from xgboost import XGBClassifier
 
-from src.preprocessing import load_cic, clean_numeric, get_feature_columns
+from src.preprocessing import load_cic, clean_numeric, get_feature_columns, align_cic_features
 from src.experiment_utils import save_experiment_plots, select_threshold, evaluate_full, log_experiment
 
 SEED = 42
-DATASET = "CIC-IDS2017" # Cambiare in "CSE-CIC-IDS2018" per il file 2018
+DATASET = "CSE-CIC-IDS2018"
 base_dir = os.path.dirname(os.path.abspath(__file__))
 
 print(f"--- BASELINE: {DATASET} ---")
-raw_dir = os.path.join(base_dir, "data", "raw", "cic_ids2017") # Aggiornare path per 2018
+raw_dir = os.path.join(base_dir, "data", "raw", "cse_cic_ids2018") # Aggiornato path per il 2018
 df = clean_numeric(load_cic(raw_dir, source_name=DATASET))
+
 
 feature_cols = get_feature_columns(df)
 X = df[feature_cols].values
@@ -71,7 +72,7 @@ for name, (base_model, params) in grids.items():
     print(f"Test -> F1={metrics['f1_botnet']} Recall={metrics['recall_botnet']} AUROC={metrics['auroc']}")
 
     log_experiment(
-        experiment_name=f"baseline_{DATASET.lower()}_{name}",
+        experiment_name=f"baseline_cse2018_{name}",
         dataset=DATASET,
         target_family=None,
         seed=SEED,
